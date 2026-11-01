@@ -1,98 +1,398 @@
-# Distributed API Platform
+# Distributed API Gateway & Observability Platform
 
-A Java 8 / Spring Boot 2.7.18 multi-module project demonstrating an API Gateway in front of User and Order services, with Redis rate limiting, load balancing, JWT authentication, resilience patterns, event-driven request telemetry, Elasticsearch storage, Prometheus metrics, and Grafana dashboards.
+A multi-module, microservices-based backend platform built with **Java 8, Spring Boot, and Spring Cloud Gateway**. The project demonstrates how an API Gateway can act as a single entry point for multiple backend services while providing authentication, traffic control, resilience, asynchronous event processing, and operational visibility.
 
-## Modules
+The platform places dedicated **User** and **Order** services behind an API Gateway. Incoming requests can be authenticated with JWTs, routed to the appropriate service, protected by Redis-backed rate limiting, and distributed across service instances. The gateway also emits request telemetry for asynchronous processing through Kafka, stores processed events in Elasticsearch, and exposes application metrics for Prometheus and Grafana.
 
-- `api-gateway`: Spring Cloud Gateway, JWT validation, routing, Redis rate limiting, load balancing, Resilience4j, Kafka producer/consumer, RabbitMQ alerts, Elasticsearch event storage, Micrometer/Prometheus metrics.
-- `user-service`: signup/login, BCrypt password hashing, JWT issuance, MongoDB persistence.
-- `order-service`: order CRUD APIs backed by MongoDB.
-- `shared-common`: placeholder module retained from the original project; it is not required by the current Maven reactor.
+> **Project scope:** This repository is an educational/local-development implementation of distributed backend patterns. It is not a production-ready deployment. See [Limitations and production considerations](#limitations-and-production-considerations).
 
-## Technology baseline
+---
 
-- Java 8
-- Spring Boot 2.7.18
-- Spring Cloud 2021.0.9
-- Spring Data Elasticsearch 4.4.x with Elasticsearch 7.17.15
-- Redis 7, Kafka (single-node KRaft), RabbitMQ 4, MongoDB 7
-- Prometheus 3.5.0 and Grafana 11.6.0
+## Table of contents
 
-## Run the complete stack
+- [Architecture at a glance](#architecture-at-a-glance)
+- [Key capabilities](#key-capabilities)
+- [Repository structure](#repository-structure)
+- [Technology stack](#technology-stack)
+- [Request lifecycle](#request-lifecycle)
+- [Services and endpoints](#services-and-endpoints)
+- [Prerequisites](#prerequisites)
+- [Configuration](#configuration)
+- [Run the platform with Docker Compose](#run-the-platform-with-docker-compose)
+- [Run services locally from an IDE](#run-services-locally-from-an-ide)
+- [Service and infrastructure URLs](#service-and-infrastructure-urls)
+- [Build and test](#build-and-test)
+- [Observability and event processing](#observability-and-event-processing)
+- [Troubleshooting](#troubleshooting)
+- [Limitations and production considerations](#limitations-and-production-considerations)
+- [Project assets](#project-assets)
 
-From this directory (`Application`), on Windows PowerShell:
+## Architecture at a glance
+
+The API Gateway is the public entry point for client requests. It applies gateway-level concerns before forwarding traffic to backend services.
+
+```text
+                         +----------------------+
+                         |        Client        |
+                         +----------+-----------+
+                                    |
+                                    v
+                     +--------------+---------------+
+                     |          API Gateway         |
+                     |       Spring Cloud Gateway  |
+                     |------------------------------|
+                     | JWT validation               |
+                     | Request routing              |
+                     | Redis rate limiting          |
+                     | Load balancing               |
+                     | Resilience / Bulkhead        |
+                     | Correlation ID and metrics   |
+                     +------+----------------+------+
+                            |                |
+                   +--------+----+     +-----+---------+
+                   | User Service|     | Order Service |
+                   | 8081 / 8083 |     |     8082      |
+                   +------+------+     +------+--------+
+                          |                   |
+                          +---------+---------+
+                                    |
+                              +-----+-----+
+                              |  MongoDB  |
+                              +-----------+
+
+       Gateway telemetry / events
+                    |
+                    v
+          +---------+----------+
+          | Async event handoff|
+          +---------+----------+
+                    |
+                    v
+                +---+---+
+                | Kafka |
+                +---+---+
+                    |
+                    v
+            +-------+---------+
+            | Event consumer  |
+            +---+----------+--+
+                |          |
+                v          v
+        +-------+---+  +---+----------------+
+        |Elasticsearch|  | RabbitMQ alerts |
+        | gateway-logs|  | gateway-alerts  |
+        +-------------+  +------------------+
+
+       Metrics endpoint --> Prometheus --> Grafana
+```
+
+The diagram is a logical view of the intended request and telemetry flow. Exact runtime behavior depends on the active configuration and which optional infrastructure containers are running.
+
+## Key capabilities
+
+| Capability | What it does |
+|---|---|
+| Centralized API entry point | Routes client traffic through a single Spring Cloud Gateway endpoint. |
+| JWT-based authentication | Validates bearer tokens at the gateway; the User Service handles signup, login, password hashing, and token issuance. |
+| Redis rate limiting | Applies a configurable request quota at the gateway using Redis. |
+| Service load balancing | Supports distributing User Service traffic across multiple instances. |
+| Resilience patterns | Includes retry/circuit-breaker configuration and a custom semaphore-based bulkhead filter to help isolate upstream failures and concurrency. |
+| Correlation IDs | Carries a request correlation identifier through gateway processing to support tracing and log investigation. |
+| Asynchronous telemetry | Hands gateway request events to an asynchronous processing path and publishes them to Kafka. |
+| Event persistence | Consumes Kafka events and indexes them in Elasticsearch, using deduplication checks. |
+| Failure alert queue | Routes server-error events to a RabbitMQ queue for asynchronous alert handling. |
+| Metrics and dashboards | Exposes application metrics through Micrometer/Actuator for Prometheus scraping and Grafana visualization. |
+| User and Order APIs | Provides user authentication flows and order CRUD operations in separate services. |
+
+## Repository structure
+
+The repository is organized as a Maven multi-module project. The root Maven project coordinates the modules and allows them to be built together.
+
+```text
+Application/
+├── api-gateway/
+│   └── src/
+│       └── main/
+│           ├── java/
+│           └── resources/
+├── user-service/
+│   └── src/
+│       └── main/
+│           ├── java/
+│           └── resources/
+├── order-service/
+│   └── src/
+│       └── main/
+│           ├── java/
+│           └── resources/
+├── shared-common/
+├── docs/
+│   ├── architecture.md
+│   └── testing-checklist.md
+├── scripts/
+│   └── smoke-test.ps1
+├── docker-compose.yml
+├── prometheus.yml
+├── .env.example
+├── pom.xml
+└── README.md
+```
+
+### Module responsibilities
+
+- **`api-gateway`** — gateway routing, JWT validation, Redis rate limiting, load balancing, resilience filters/configuration, correlation IDs, Kafka event production/consumption integration, RabbitMQ alert handling, Elasticsearch event storage, and Actuator/Micrometer metrics.
+- **`user-service`** — user signup and login, BCrypt password hashing, JWT generation, and MongoDB persistence.
+- **`order-service`** — order creation, retrieval, update, and deletion APIs backed by MongoDB.
+- **`shared-common`** — retained from the original project structure as a placeholder. It is not currently required by the active Maven reactor.
+
+## Technology stack
+
+| Area | Technology / version |
+|---|---|
+| Language | Java 8 |
+| Application framework | Spring Boot 2.7.18 |
+| Cloud components | Spring Cloud 2021.0.9 |
+| API gateway | Spring Cloud Gateway 3.1.9 |
+| Persistence | Spring Data MongoDB with MongoDB 7 |
+| Authentication | Spring Security, JWT, BCrypt |
+| Rate limiting | Redis 7 |
+| Resilience | Resilience4j configuration and custom semaphore-based bulkhead filter |
+| Messaging | Apache Kafka (single-node KRaft), RabbitMQ 4 |
+| Event storage | Spring Data Elasticsearch 4.4.x, Elasticsearch 7.17.15 |
+| Metrics | Spring Boot Actuator, Micrometer, Prometheus 3.5.0 |
+| Dashboards | Grafana 11.6.0 |
+| Build | Maven 3.8+ |
+| Local infrastructure | Docker Compose |
+
+## Request lifecycle
+
+A typical authenticated request follows this sequence:
+
+1. **Sign up:** a client registers using `POST /user/signup`.
+2. **Authenticate:** the client calls `POST /user/login`. The User Service verifies the credentials and returns a JWT.
+3. **Send a protected request:** the client calls the gateway and supplies the token in the `Authorization: Bearer <token>` header.
+4. **Validate and control traffic:** the gateway validates the token and applies configured gateway filters, including rate limiting and resilience controls.
+5. **Route to a backend:** the gateway forwards the request to the User or Order service. User Service traffic can be distributed across two configured instances.
+6. **Process the business operation:** the backend service executes the operation and uses MongoDB for persistence where applicable.
+7. **Publish request telemetry:** gateway request events are handed to a bounded asynchronous executor and published to Kafka.
+8. **Consume and store events:** the consumer processes events, performs deduplication using an in-memory Bloom filter together with an Elasticsearch existence check, and indexes records in the `gateway-logs` index.
+9. **Handle server-error events:** 5xx events are also sent to the `gateway-alerts` RabbitMQ queue for asynchronous listener processing.
+10. **Observe the platform:** Prometheus scrapes the gateway's Actuator metrics endpoint, and Grafana provides a dashboard view of the collected metrics.
+
+## Services and endpoints
+
+The following are the local development ports used by the project configuration.
+
+| Component | Local address | Purpose |
+|---|---|---|
+| API Gateway | `http://localhost:8080` | Client-facing gateway |
+| User Service | `http://localhost:8081` | User API instance |
+| User Service replica | `http://localhost:8083` | Additional User API instance |
+| Order Service | `http://localhost:8082` | Order API |
+| Gateway Swagger UI | `http://localhost:8080/swagger-ui.html` | API documentation UI |
+| Gateway health | `http://localhost:8080/actuator/health` | Gateway health indicator |
+| Gateway Prometheus metrics | `http://localhost:8080/actuator/prometheus` | Metrics scrape endpoint |
+| Prometheus UI | `http://localhost:9090` | Metrics query interface |
+| Grafana | `http://localhost:3000` | Dashboard UI |
+| Elasticsearch | `http://localhost:9200` | Indexed event store |
+| RabbitMQ management | `http://localhost:15672` | Broker management UI |
+| Kafka host listener | `localhost:9092` | Kafka bootstrap listener |
+
+These addresses are intended for local development. They are not public deployment URLs.
+
+## Prerequisites
+
+Before starting the full stack, install:
+
+- **JDK 8** compatible with the configured project baseline.
+- **Maven 3.8 or later**.
+- **Docker Desktop** with Docker Compose support.
+- **Git** to clone the repository.
+
+The first Docker build requires internet access to download Maven dependencies and container images. The Dockerfiles build modules from the root Maven aggregator so that the parent POM can be resolved correctly.
+
+## Configuration
+
+### Environment variables
+
+A local `.env` file is read automatically by Docker Compose. Start from the example file:
 
 ```powershell
 Copy-Item .env.example .env
-# Edit .env and replace all placeholder secrets before starting the stack.
-docker compose down --remove-orphans
+```
+
+Open `.env` and replace placeholder values before starting the stack. At a minimum, configure:
+
+| Variable | Purpose | Guidance |
+|---|---|---|
+| `JWT_SECRET` | Signs and validates JWTs in the User Service and Gateway | Use a strong secret of at least 32 bytes. The same value must be configured in both services. |
+| `RABBITMQ_PASSWORD` | Password for the RabbitMQ broker and gateway connection | Replace the local development value with a strong password. |
+| `GRAFANA_ADMIN_PASSWORD` | Initial Grafana administrator password | Choose a unique password and keep it private. |
+
+**Never commit a real `.env` file, passwords, API keys, signing secrets, or production credentials.** Commit only `.env.example` with safe placeholders.
+
+If a Grafana data volume already exists, Grafana may continue using the administrator password stored in that volume. `GF_SECURITY_ADMIN_PASSWORD` initializes credentials for a new Grafana data directory; changing the environment variable does not necessarily reset an existing volume's password.
+
+## Run the platform with Docker Compose
+
+Run these commands from the repository root (the directory containing `docker-compose.yml`).
+
+### 1. Create and edit the environment file
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and replace all placeholder secrets.
+
+### 2. Validate the Compose configuration
+
+```powershell
 docker compose config
+```
+
+Resolve any configuration errors before continuing.
+
+### 3. Build and start the containers
+
+```powershell
 docker compose up --build -d
+```
+
+### 4. Check container status
+
+```powershell
 docker compose ps
 ```
 
-`docker compose down --remove-orphans` removes old containers from an earlier Compose layout but keeps named data volumes. Do not add `-v` unless you intentionally want to delete MongoDB, RabbitMQ, Elasticsearch, Prometheus, and Grafana data. The first build needs internet access to download Maven dependencies and container images. The Dockerfiles build each Maven module from the root aggregator so the relative parent POM resolves correctly.
+Allow health checks and first-time initialization to complete. You can inspect a service's logs with:
 
-## Local URLs
+```powershell
+docker compose logs -f api-gateway
+```
 
-| Component | URL |
-|---|---|
-| API Gateway | http://localhost:8080 |
-| User Service (direct) | http://localhost:8081 |
-| User Service replica (direct) | http://localhost:8083 |
-| Order Service (direct) | http://localhost:8082 |
-| Gateway Swagger UI | http://localhost:8080/swagger-ui.html |
-| Gateway Actuator health | http://localhost:8080/actuator/health |
-| Prometheus metrics | http://localhost:8080/actuator/prometheus |
-| Prometheus UI | http://localhost:9090 |
-| Grafana | http://localhost:3000 |
-| Elasticsearch | http://localhost:9200 |
-| RabbitMQ management | http://localhost:15672 |
-| Kafka host listener | localhost:9092 |
+Replace `api-gateway` with the relevant Compose service name when inspecting another component.
 
-## Environment variables
+### Stop the stack
 
-For local development, the compose file provides development defaults. Before using outside a local machine, set strong values for:
+```powershell
+docker compose down
+```
 
-- `JWT_SECRET` — at least 32 bytes; must be identical for User Service and Gateway.
-- `RABBITMQ_PASSWORD` — RabbitMQ password passed to both broker and Gateway.
-- `GRAFANA_ADMIN_PASSWORD` — Grafana `admin` password.
+The command above stops and removes the Compose containers and network while retaining named data volumes. To remove stored MongoDB, RabbitMQ, Elasticsearch, Prometheus, and Grafana data as well, Docker Compose supports the `-v` option:
 
-A `.env` file is loaded automatically by Docker Compose. Do not commit real secrets. If you already have a persistent Grafana volume, its existing admin password remains in effect; `GF_SECURITY_ADMIN_PASSWORD` only initializes a new Grafana data directory.
+```powershell
+docker compose down -v
+```
 
-## API flow
+**Use `-v` only when you intentionally want to delete the persisted development data.**
 
-1. Create a user through `POST /user/signup`.
-2. Login through `POST /user/login`; the response contains a JWT.
-3. Send protected requests through the Gateway with `Authorization: Bearer <token>`.
-4. Gateway forwards requests to User/Order services. User Service requests are distributed over two container instances.
-5. Gateway request events are handed off to a bounded async executor, published to Kafka, consumed, deduplicated using an in-memory Bloom filter plus an Elasticsearch existence check, and indexed in `gateway-logs`.
-6. 5xx events are also sent asynchronously to the `gateway-alerts` RabbitMQ queue and logged by its listener.
-7. Prometheus scrapes `/actuator/prometheus`; Grafana provisions a starter dashboard automatically.
+When migrating from an older Compose layout, `docker compose down --remove-orphans` can also remove orphaned containers while retaining named volumes.
 
-## Important limitations
+## Run services locally from an IDE
 
-This is a local-development demonstration, not a production deployment. Kafka and Elasticsearch are single-node, RabbitMQ has local-development credentials by default, the Bloom filter is in-memory and resets on restart, and the default JWT secret must be replaced. Add TLS, secret management, persistent Kafka storage, authentication/authorization for infrastructure endpoints, and multi-node replication before production use.
+The backend services can also be launched individually from an IDE such as IntelliJ IDEA, while infrastructure dependencies run separately through Docker Compose.
 
-## Build locally
+Typical local service ports:
 
-With Maven 3.8+ and JDK 8 installed:
+- API Gateway: `8080`
+- User Service: `8081`
+- Second User Service instance: `8083`
+- Order Service: `8082`
+
+To run a second User Service instance, create a second run configuration for the same application and override its server port to `8083` (for example, with `--server.port=8083`). Ensure that the gateway's service discovery/load-balancing configuration points to the instances you intend to use.
+
+The exact IDE run configuration and environment-variable setup may differ between local machines. Make sure required MongoDB, Redis, Kafka, RabbitMQ, and Elasticsearch dependencies are reachable before starting features that rely on them.
+
+## Build and test
+
+### Package the Maven modules
+
+From the repository root:
 
 ```bash
 mvn -B -DskipTests clean package
 ```
 
-The source archive supplied for this repair did not contain a Maven wrapper. Ensure Maven is installed locally before running the command.
+This command compiles and packages the modules while skipping test execution.
 
+### Run unit tests
 
-## Included completion assets
+```bash
+mvn test
+```
 
-- `scripts/smoke-test.ps1` performs the final HTTP/API/event-index smoke test after the stack is built and running.
-- `docs/testing-checklist.md` lists the full acceptance sequence, including rate limiting, retry, circuit breaker, load balancing, RabbitMQ alerting, Kafka indexing, and Grafana.
-- `docs/architecture.md` contains the architecture diagram.
+JUnit and Mockito tests in the source tree cover core User Service authentication flows, Order Service behavior, and Bloom-filter membership. Test results depend on the current source and configuration; run the command locally to verify the current checkout.
 
-Run the smoke-test script only from the extracted `Application` root folder. It is intentionally not run during source preparation.
+The supplied source archive does not include a Maven wrapper. Install Maven locally and ensure that `mvn` is available on your PATH before running these commands.
 
-## Unit tests
+### Run the smoke-test script
 
-JUnit/Mockito unit tests cover core User Service authentication flows, Order Service behavior, and Bloom-filter membership. They are included in the source tree and should be run during the testing phase with `mvn test`.
+After the stack is running and its dependencies are ready, execute the PowerShell smoke test from the repository root:
+
+```powershell
+.\scripts\smoke-test.ps1
+```
+
+The script performs HTTP/API and event-index checks against the running stack. It is intended to be run after startup, not during source preparation.
+
+## Observability and event processing
+
+### Prometheus metrics
+
+The gateway exposes metrics through Spring Boot Actuator at:
+
+`http://localhost:8080/actuator/prometheus`
+
+Prometheus is configured to scrape the gateway metrics endpoint. Open `http://localhost:9090` to query collected time-series data.
+
+### Grafana dashboards
+
+Grafana is available at `http://localhost:3000`. The project provisions a starter dashboard through its local configuration. Use it to explore the metrics collected by Prometheus.
+
+### Kafka event pipeline
+
+Gateway telemetry is passed to an asynchronous executor, published to Kafka, and consumed by the event-processing component. Successfully processed events are indexed in Elasticsearch under the `gateway-logs` index. The in-memory Bloom filter is used as an initial deduplication check, with an Elasticsearch existence check as an additional safeguard.
+
+### RabbitMQ alert queue
+
+Server-error (5xx) events are published asynchronously to the `gateway-alerts` queue. The configured listener receives and logs these alert messages. This queue is intended as a demonstration of asynchronous alert handoff, not as a complete incident-management system.
+
+## Troubleshooting
+
+| Symptom | Checks |
+|---|---|
+| A service does not start | Check `docker compose ps` and `docker compose logs -f <service-name>`; verify its port is available. |
+| Gateway cannot reach a backend | Confirm the backend health endpoint, gateway route configuration, service instance ports, and container network settings. |
+| MongoDB or another dependency is unavailable | Confirm the relevant container is running and healthy, then verify the connection settings in the environment/configuration. |
+| JWT validation fails | Check that the User Service and Gateway use the same `JWT_SECRET`, that the token has not expired, and that the request includes the `Bearer` prefix. |
+| Rate limiting behaves unexpectedly | Confirm Redis is reachable and review the gateway rate-limit configuration and client identity/key-resolution strategy. |
+| Metrics are missing | Check the gateway Actuator endpoint, Prometheus target status, and the scrape configuration in `prometheus.yml`. |
+| Events are not visible in Elasticsearch | Inspect Kafka broker/consumer logs, Elasticsearch health, index availability, and event-consumer logs. |
+| Grafana login does not accept the current environment password | Check whether an existing Grafana data volume retains an earlier administrator credential. |
+
+For diagnosis, inspect the logs of the affected component rather than restarting or deleting all containers and volumes immediately.
+
+## Limitations and production considerations
+
+This repository is designed as a local-development and learning platform. The following considerations should be addressed before production use:
+
+- Kafka and Elasticsearch are configured as single-node components; they do not provide production-grade high availability in this setup.
+- RabbitMQ uses local-development credentials by default unless overridden through environment variables.
+- The Bloom filter is in-memory and is reset when the application restarts.
+- The default JWT secret must be replaced, and secrets should be managed through a dedicated secret-management mechanism.
+- Infrastructure management endpoints and dashboards should be protected with appropriate authentication and network controls.
+- Production deployments should use TLS, durable storage, backups, monitoring/alerting policies, access control, and multi-node replication where required.
+- Capacity limits, retry policies, circuit-breaker thresholds, retention policies, and failure behavior should be load-tested and tuned for the target environment.
+
+## Project assets
+
+- **`docs/architecture.md`** — architecture notes and diagram.
+- **`docs/testing-checklist.md`** — acceptance checklist covering rate limiting, retry, circuit breaker, load balancing, RabbitMQ alerting, Kafka indexing, and Grafana.
+- **`scripts/smoke-test.ps1`** — PowerShell smoke-test script for the running local stack.
+
+---
+
+## Purpose
+
+The goal of this project is to demonstrate how common distributed-backend concerns can be brought together around an API Gateway: securing requests, controlling traffic, isolating failures, processing telemetry asynchronously, persisting operational events, and making service behavior observable.
