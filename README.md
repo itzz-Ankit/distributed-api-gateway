@@ -106,37 +106,143 @@ The diagram is a logical view of the intended request and telemetry flow. Exact 
 
 ## Repository structure
 
-The repository is organized as a Maven multi-module project. The root Maven project coordinates the modules and allows them to be built together.
+The repository uses a **Maven multi-module layout**. Each runnable service has its own `pom.xml`, Dockerfile, application source, configuration, and tests. Shared Docker Compose, Prometheus, documentation, and Grafana provisioning files are maintained at the repository root or under `infrastructure/`.
 
 ```text
-Application/
+distributed-api-gateway/
 ├── api-gateway/
-│   └── src/
-│       └── main/
-│           ├── java/
-│           └── resources/
+│   ├── src/
+│   │   ├── main/
+│   │   │   ├── java/
+│   │   │   │   ├── Dto/
+│   │   │   │   │   ├── request.java
+│   │   │   │   │   └── response.java
+│   │   │   │   └── com/platform/gateway/
+│   │   │   │       ├── ApiGatewayApplication.java
+│   │   │   │       ├── BulkheadConfiguration.java
+│   │   │   │       ├── CircuitBreakerEventLogger.java
+│   │   │   │       ├── CorrelationIdGlobalFilter.java
+│   │   │   │       ├── FallbackController.java
+│   │   │   │       ├── GatewayAsyncConfiguration.java
+│   │   │   │       ├── GatewayConfig.java
+│   │   │   │       ├── GatewayExceptionHandler.java
+│   │   │   │       ├── GatewayMetricsFilter.java
+│   │   │   │       ├── GatewayObservabilityController.java
+│   │   │   │       ├── GatewayRequestEvent.java
+│   │   │   │       ├── JwtAuthenticationManager.java
+│   │   │   │       ├── JwtService.java
+│   │   │   │       ├── RateLimitConfig.java
+│   │   │   │       ├── SecurityConfig.java
+│   │   │   │       ├── Service.java
+│   │   │   │       ├── event/
+│   │   │   │       │   ├── Consumer.java
+│   │   │   │       │   ├── GatewayRabbitIntegration.java
+│   │   │   │       │   ├── KafkaTopicConfiguration.java
+│   │   │   │       │   └── Producer.java
+│   │   │   │       └── observability/
+│   │   │   │           └── GatewayEventBloomFilter.java
+│   │   │   └── resources/
+│   │   │       ├── application.yml
+│   │   │       └── application-docker.yml
+│   │   └── test/java/com/platform/gateway/observability/
+│   │       └── GatewayEventBloomFilterTest.java
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   └── pom.xml
+│
 ├── user-service/
-│   └── src/
-│       └── main/
-│           ├── java/
-│           └── resources/
+│   ├── src/
+│   │   ├── main/
+│   │   │   ├── java/
+│   │   │   │   ├── Config/
+│   │   │   │   │   ├── PasswordConfig.java
+│   │   │   │   │   └── SecurityConfig.java
+│   │   │   │   ├── Exception/
+│   │   │   │   │   └── GlobalExceptionHandler.java
+│   │   │   │   ├── Mapper/
+│   │   │   │   │   └── UserMapper.java
+│   │   │   │   ├── Security/
+│   │   │   │   │   └── JwtAuthFilter.java
+│   │   │   │   ├── Util/
+│   │   │   │   │   └── JwtUtil.java
+│   │   │   │   ├── com/platform/userservice/
+│   │   │   │   │   ├── User.java
+│   │   │   │   │   ├── UserController.java
+│   │   │   │   │   ├── UserRepository.java
+│   │   │   │   │   ├── UserService.java
+│   │   │   │   │   └── UserServiceApplication.java
+│   │   │   │   ├── dto_request/
+│   │   │   │   │   ├── LoginReq.java
+│   │   │   │   │   └── SignupReq.java
+│   │   │   │   └── dto_response/
+│   │   │   │       ├── AuthResponse.java
+│   │   │   │       └── UserResponse.java
+│   │   │   └── resources/
+│   │   │       └── application.yml
+│   │   └── test/java/com/platform/userservice/
+│   │       └── UserServiceTest.java
+│   ├── Dockerfile
+│   └── pom.xml
+│
 ├── order-service/
-│   └── src/
-│       └── main/
-│           ├── java/
-│           └── resources/
+│   ├── src/
+│   │   ├── main/
+│   │   │   ├── java/
+│   │   │   │   ├── Dto_req/
+│   │   │   │   │   ├── CreateOrderRequest.java
+│   │   │   │   │   └── UpdateOrderRequest.java
+│   │   │   │   ├── Dto_response/
+│   │   │   │   │   └── OrderResponse.java
+│   │   │   │   ├── Event/
+│   │   │   │   │   └── OrderCreatedEvent.java
+│   │   │   │   ├── Mapper/
+│   │   │   │   │   └── OrderMapper.java
+│   │   │   │   └── com/platform/orderservice/
+│   │   │   │       ├── GlobalExceptionalHandler.java
+│   │   │   │       ├── Order.java
+│   │   │   │       ├── OrderController.java
+│   │   │   │       ├── OrderRepository.java
+│   │   │   │       ├── OrderService.java
+│   │   │   │       └── OrderServiceApplication.java
+│   │   │   └── resources/
+│   │   │       └── application.yml
+│   │   └── test/java/com/platform/orderservice/
+│   │       └── OrderServiceTest.java
+│   ├── Dockerfile
+│   └── pom.xml
+│
 ├── shared-common/
+│   └── pom.xml
+│
 ├── docs/
 │   ├── architecture.md
+│   ├── implementation-inventory.md
+│   ├── repair-notes.md
 │   └── testing-checklist.md
+│
+├── infrastructure/
+│   └── grafana/
+│       ├── dashboards/
+│       │   └── api-gateway-overview.json
+│       └── provisioning/
+│           ├── dashboards/
+│           │   └── dashboards.yml
+│           └── datasources/
+│               └── prometheus.yml
+│
 ├── scripts/
 │   └── smoke-test.ps1
-├── docker-compose.yml
-├── prometheus.yml
+│
+├── .dockerignore
 ├── .env.example
+├── .gitignore
+├── docker-compose.yml
 ├── pom.xml
+├── prometheus.yml
 └── README.md
 ```
+
+> **Note:** This tree reflects the files currently committed to this repository. Package-folder capitalization (for example, `Dto`, `Config`, and `dto_request`) is shown as it exists in the source tree. The `shared-common` module currently contains only its Maven descriptor; it does not currently contain shared Java source files.
 
 ### Module responsibilities
 
