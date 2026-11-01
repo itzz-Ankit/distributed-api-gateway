@@ -1,0 +1,56 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  redis:
+    host: redis
+    port: 6379
+    timeout: 3s
+  kafka:
+    bootstrap-servers: kafka:29092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    consumer:
+      group-id: api-gateway
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      auto-startup: true
+  rabbitmq:
+    host: rabbitmq
+    port: 5672
+    username: gateway_user
+    password: ${RABBITMQ_PASSWORD:local-dev-only-change-me}
+    connection-timeout: 5s
+  elasticsearch:
+    uris: http://elasticsearch:9200
+    connection-timeout: 5s
+    socket-timeout: 10s
+  cloud:
+    gateway:
+      metrics:
+        enabled: true
+    circuitbreaker:
+      resilience4j:
+        enableSemaphoreDefaultBulkhead: true
+    discovery:
+      client:
+        simple:
+          instances:
+            user-service:
+              - uri: http://user-service:8080
+              - uri: http://user-service-replica:8080
+            order-service:
+              - uri: http://order-service:8082
+
+jwt:
+  secret: ${JWT_SECRET:dev-only-change-this-secret-32-bytes}
+
+logging:
+  level:
+    root: INFO
+    com.platform.gateway: INFO
